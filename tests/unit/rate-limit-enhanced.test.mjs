@@ -320,3 +320,35 @@ test("checkFallbackError: short retry-after header is now honored", () => {
   // Should use the 30s from header, not fall through to 1s exponential
   assert.ok(result.cooldownMs >= 29000, `expected ~30000, got ${result.cooldownMs}`);
 });
+
+// ─── Auto-decay backoffLevel preservation ──────────────────────────────────
+// The auto-decay in getProviderCredentials clears error state when
+// rateLimitedUntil expires, but intentionally preserves backoffLevel so that
+// if the next request also 429s, escalation continues instead of restarting.
+// These tests verify the observable consequence: an account with expired
+// cooldown but high backoffLevel is still selectable, and the next 429
+// produces an escalated cooldown (not 1s).
+
+test("filterAvailableAccounts: account with high backoffLevel but expired cooldown is selectable", () => {
+  const accounts = [
+    {
+      id: "a",
+      rateLimitedUntil: new Date(Date.now() - 60_000).toISOString(), // expired 1 min ago
+      backoffLevel: 10,
+      testStatus: "active",
+    },
+  ];
+  const available = filterAvailableAccounts(accounts);
+  assert.equal(available.length, 1, "account should be selectable despite high backoffLevel");
+  assert.equal(available[0].id, "a");
+});
+
+test("checkFallbackError: preserved backoffLevel produces escalated cooldown on next 429", () => {
+  // Simulates: account was at level 10, cooldown expired, auto-decay preserved
+  // backoffLevel, account retried and got 429 again. The cooldown should use
+  // level 10 (600s), not restart from level 0 (1s).
+  const result = checkFallbackError(429, "", 10);
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, BACKOFF_STEPS_MS[3]); // 600s (10 min)
+  assert.equal(result.newBackoffLevel, 11);
+});

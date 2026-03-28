@@ -351,6 +351,8 @@ export function getEscalatingCooldown(backoffLevel = 0) {
  * @param {number} backoffLevel - Current backoff level for exponential backoff
  * @param {string} [model] - Optional model name for model-level lockout
  * @param {string} [provider] - Provider ID for profile-aware cooldowns
+ * @param {Headers|object} [headers] - Response headers for retry-after extraction
+ * @param {number} [retryAfterMs] - Pre-parsed retry-after value in ms (floor for computed backoff)
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, reason?: string }}
  */
 export function checkFallbackError(

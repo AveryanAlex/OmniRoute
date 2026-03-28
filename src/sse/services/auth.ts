@@ -368,19 +368,18 @@ export async function getProviderCredentials(
       return null;
     }
 
-    // Auto-decay backoffLevel for accounts whose rateLimitedUntil has passed.
-    // Without this, high backoffLevel permanently deprioritizes accounts even
-    // after the rate limit window expires, creating a deadlock where the account
-    // needs a successful request to reset but never gets selected.
+    // Auto-recover accounts whose rateLimitedUntil has passed so they become
+    // selectable again. backoffLevel is intentionally preserved — if the next
+    // request also gets 429, escalation continues from the previous level
+    // instead of restarting from 1s. Only clearAccountError() (called on
+    // successful request via onRequestSuccess) resets backoffLevel to 0.
     for (const c of connections) {
       if (
         c.backoffLevel > 0 &&
         !isTerminalConnectionStatus(c) &&
         !isAccountUnavailable(c.rateLimitedUntil)
       ) {
-        c.backoffLevel = 0;
         updateProviderConnection(c.id, {
-          backoffLevel: 0,
           testStatus: "active",
           lastError: null,
           lastErrorAt: null,

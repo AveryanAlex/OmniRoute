@@ -448,11 +448,11 @@ export function checkFallbackError(
       if (resetTime) {
         const waitMs = resetTime - Date.now();
         if (waitMs > 0) {
-          const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+          // Provider gave exact reset time — no need to escalate further
           return {
             shouldFallback: true,
             cooldownMs: waitMs,
-            newBackoffLevel: newLevel,
+            newBackoffLevel: 0,
             reason: RateLimitReason.RATE_LIMIT_EXCEEDED,
           };
         }
@@ -502,11 +502,11 @@ export function checkFallbackError(
     if (resetTime) {
       const waitMs = resetTime - Date.now();
       if (waitMs > 0) {
-        const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+        // Provider gave exact reset time — no need to escalate further
         return {
           shouldFallback: true,
           cooldownMs: waitMs,
-          newBackoffLevel: newLevel,
+          newBackoffLevel: 0,
           reason: RateLimitReason.RATE_LIMIT_EXCEEDED,
         };
       }
@@ -542,7 +542,7 @@ export function checkFallbackError(
         return {
           shouldFallback: true,
           cooldownMs: waitMs,
-          newBackoffLevel: Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel),
+          newBackoffLevel: 0,
           reason: RateLimitReason.SERVER_ERROR,
         };
       }

@@ -118,6 +118,26 @@ export async function parseUpstreamError(response, provider = null) {
     retryAfterMs = parseAntigravityRetryTime(messageStr);
   }
 
+  // Generic retry-after header parsing for all providers on 429
+  if (!retryAfterMs && response.status === 429 && response.headers) {
+    const retryAfter =
+      typeof response.headers.get === "function"
+        ? response.headers.get("retry-after")
+        : response.headers["retry-after"] || response.headers["Retry-After"];
+
+    if (retryAfter) {
+      const seconds = parseInt(retryAfter, 10);
+      if (!isNaN(seconds) && String(seconds) === String(retryAfter).trim()) {
+        retryAfterMs = seconds * 1000;
+      } else {
+        const date = new Date(retryAfter);
+        if (!isNaN(date.getTime())) {
+          retryAfterMs = Math.max(0, date.getTime() - Date.now());
+        }
+      }
+    }
+  }
+
   return {
     statusCode: response.status,
     message: messageStr,

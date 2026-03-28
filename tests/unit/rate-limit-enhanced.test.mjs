@@ -12,6 +12,7 @@ const {
   getAllModelLockouts,
   getQuotaCooldown,
   getBackoffDuration,
+  getEscalatingCooldown,
   getAccountHealth,
   isAccountUnavailable,
   getUnavailableUntil,
@@ -271,4 +272,83 @@ test("filterAvailableAccounts: filters out rate-limited", () => {
     available.map((a) => a.id),
     ["a", "c"]
   );
+});
+
+// ─── Escalating Backoff Tests ──────────────────────────────────────────────
+
+test("getEscalatingCooldown: levels 0-6 use exponential backoff", () => {
+  assert.equal(getEscalatingCooldown(0), 1000);
+  assert.equal(getEscalatingCooldown(1), 2000);
+  assert.equal(getEscalatingCooldown(6), 64000);
+});
+
+test("getEscalatingCooldown: levels 7+ switch to BACKOFF_STEPS_MS", () => {
+  assert.equal(getEscalatingCooldown(7), BACKOFF_STEPS_MS[0]); // 60s
+  assert.equal(getEscalatingCooldown(8), BACKOFF_STEPS_MS[1]); // 120s
+  assert.equal(getEscalatingCooldown(9), BACKOFF_STEPS_MS[2]); // 300s
+  assert.equal(getEscalatingCooldown(10), BACKOFF_STEPS_MS[3]); // 600s
+  assert.equal(getEscalatingCooldown(11), BACKOFF_STEPS_MS[4]); // 1200s
+  // Beyond steps array — capped at last step
+  assert.equal(getEscalatingCooldown(15), BACKOFF_STEPS_MS[4]); // 1200s
+});
+
+test("checkFallbackError: 429 at high backoffLevel uses escalating cooldown (not 2-min cap)", () => {
+  const result = checkFallbackError(429, "rate limit", 10);
+  // Level 10 → BACKOFF_STEPS_MS[3] = 600000 (10 min)
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, 600000);
+  assert.equal(result.reason, RateLimitReason.RATE_LIMIT_EXCEEDED);
+});
+
+test("checkFallbackError: retryAfterMs is respected as cooldown floor", () => {
+  const result = checkFallbackError(429, "", 0, null, null, null, 300000);
+  assert.equal(result.shouldFallback, true);
+  assert.ok(result.cooldownMs >= 300000, `expected >= 300000, got ${result.cooldownMs}`);
+});
+
+test("checkFallbackError: retryAfterMs does not reduce computed backoff", () => {
+  // Level 10 → 600s backoff, retryAfterMs = 5s — should keep 600s
+  const result = checkFallbackError(429, "", 10, null, null, null, 5000);
+  assert.equal(result.shouldFallback, true);
+  assert.ok(result.cooldownMs >= 600000, `expected >= 600000, got ${result.cooldownMs}`);
+});
+
+test("checkFallbackError: short retry-after header is now honored", () => {
+  const headers = new Headers({ "retry-after": "30" });
+  const result = checkFallbackError(429, "", 0, null, null, headers);
+  assert.equal(result.shouldFallback, true);
+  // Should use the 30s from header, not fall through to 1s exponential
+  assert.ok(result.cooldownMs >= 29000, `expected ~30000, got ${result.cooldownMs}`);
+});
+
+// ─── Auto-decay backoffLevel preservation ──────────────────────────────────
+// The auto-decay in getProviderCredentials clears error state when
+// rateLimitedUntil expires, but intentionally preserves backoffLevel so that
+// if the next request also 429s, escalation continues instead of restarting.
+// These tests verify the observable consequence: an account with expired
+// cooldown but high backoffLevel is still selectable, and the next 429
+// produces an escalated cooldown (not 1s).
+
+test("filterAvailableAccounts: account with high backoffLevel but expired cooldown is selectable", () => {
+  const accounts = [
+    {
+      id: "a",
+      rateLimitedUntil: new Date(Date.now() - 60_000).toISOString(), // expired 1 min ago
+      backoffLevel: 10,
+      testStatus: "active",
+    },
+  ];
+  const available = filterAvailableAccounts(accounts);
+  assert.equal(available.length, 1, "account should be selectable despite high backoffLevel");
+  assert.equal(available[0].id, "a");
+});
+
+test("checkFallbackError: preserved backoffLevel produces escalated cooldown on next 429", () => {
+  // Simulates: account was at level 10, cooldown expired, auto-decay preserved
+  // backoffLevel, account retried and got 429 again. The cooldown should use
+  // level 10 (600s), not restart from level 0 (1s).
+  const result = checkFallbackError(429, "", 10);
+  assert.equal(result.shouldFallback, true);
+  assert.equal(result.cooldownMs, BACKOFF_STEPS_MS[3]); // 600s (10 min)
+  assert.equal(result.newBackoffLevel, 11);
 });

@@ -328,6 +328,22 @@ export function getQuotaCooldown(backoffLevel = 0) {
   return Math.min(cooldown, BACKOFF_CONFIG.max);
 }
 
+// Level at which exponential backoff hits BACKOFF_CONFIG.max (1000 * 2^7 = 128000 > 120000)
+const EXPONENTIAL_CAP_LEVEL = 7;
+
+/**
+ * Escalating cooldown: exponential for levels 0-6 (1s..64s), then
+ * BACKOFF_STEPS_MS for levels 7+ (60s, 120s, 300s, 600s, 1200s).
+ * Prevents the 2-minute ceiling from causing infinite 429 loops
+ * when provider limits last hours/days.
+ */
+export function getEscalatingCooldown(backoffLevel = 0) {
+  if (backoffLevel >= EXPONENTIAL_CAP_LEVEL) {
+    return getBackoffDuration(backoffLevel - EXPONENTIAL_CAP_LEVEL);
+  }
+  return getQuotaCooldown(backoffLevel);
+}
+
 /**
  * Check if error should trigger account fallback (switch to next account)
  * @param {number} status - HTTP status code
@@ -335,6 +351,8 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} backoffLevel - Current backoff level for exponential backoff
  * @param {string} [model] - Optional model name for model-level lockout
  * @param {string} [provider] - Provider ID for profile-aware cooldowns
+ * @param {Headers|object} [headers] - Response headers for retry-after extraction
+ * @param {number} [retryAfterMs] - Pre-parsed retry-after value in ms (floor for computed backoff)
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number, reason?: string }}
  */
 export function checkFallbackError(
@@ -343,7 +361,8 @@ export function checkFallbackError(
   backoffLevel = 0,
   model = null,
   provider = null,
-  headers = null
+  headers = null,
+  retryAfterMs = null
 ) {
   const errorStr = (errorText || "").toString();
 
@@ -419,7 +438,7 @@ export function checkFallbackError(
       };
     }
 
-    // Rate limit keywords - exponential backoff
+    // Rate limit keywords - escalating backoff
     if (
       lowerError.includes("rate limit") ||
       lowerError.includes("too many requests") ||
@@ -430,7 +449,8 @@ export function checkFallbackError(
       const resetTime = parseResetFromHeaders(headers);
       if (resetTime) {
         const waitMs = resetTime - Date.now();
-        if (waitMs > 60_000) {
+        if (waitMs > 0) {
+          // Provider gave exact reset time — no need to escalate further
           return {
             shouldFallback: true,
             cooldownMs: waitMs,
@@ -441,9 +461,13 @@ export function checkFallbackError(
       }
       const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
       const reason = classifyErrorText(errorStr);
+      let cooldownMs = getEscalatingCooldown(backoffLevel);
+      if (retryAfterMs && retryAfterMs > 0) {
+        cooldownMs = Math.max(cooldownMs, retryAfterMs);
+      }
       return {
         shouldFallback: true,
-        cooldownMs: getQuotaCooldown(backoffLevel),
+        cooldownMs,
         newBackoffLevel: newLevel,
         reason,
       };
@@ -474,12 +498,13 @@ export function checkFallbackError(
     };
   }
 
-  // 429 - Rate limit with exponential backoff
+  // 429 - Rate limit with escalating backoff
   if (status === HTTP_STATUS.RATE_LIMITED) {
     const resetTime = parseResetFromHeaders(headers);
     if (resetTime) {
       const waitMs = resetTime - Date.now();
-      if (waitMs > 60_000) {
+      if (waitMs > 0) {
+        // Provider gave exact reset time — no need to escalate further
         return {
           shouldFallback: true,
           cooldownMs: waitMs,
@@ -490,9 +515,13 @@ export function checkFallbackError(
     }
 
     const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
+    let cooldownMs = getEscalatingCooldown(backoffLevel);
+    if (retryAfterMs && retryAfterMs > 0) {
+      cooldownMs = Math.max(cooldownMs, retryAfterMs);
+    }
     return {
       shouldFallback: true,
-      cooldownMs: getQuotaCooldown(backoffLevel),
+      cooldownMs,
       newBackoffLevel: newLevel,
       reason: RateLimitReason.RATE_LIMIT_EXCEEDED,
     };
@@ -511,7 +540,7 @@ export function checkFallbackError(
     const resetTime = parseResetFromHeaders(headers, errorStr);
     if (resetTime) {
       const waitMs = resetTime - Date.now();
-      if (waitMs > 60_000) {
+      if (waitMs > 0) {
         return {
           shouldFallback: true,
           cooldownMs: waitMs,

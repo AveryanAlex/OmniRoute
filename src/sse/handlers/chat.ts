@@ -485,7 +485,8 @@ async function handleSingleModelChat(
       result.status,
       result.error,
       provider,
-      model
+      model,
+      result.retryAfterMs ?? null
     );
 
     if (shouldFallback) {
